@@ -1,213 +1,159 @@
 #!/bin/bash
 
-# anytls 安装/卸载管理脚本
-# 功能：安装 anytls 或彻底卸载（含 systemd 服务清理）
-# 支持架构：amd64 (x86_64)、arm64 (aarch64)、armv7 (armv7l)
+set -e
 
-# 检查 root 权限
-if [ "$(id -u)" -ne 0 ]; then
-    echo "必须使用 root 或 sudo 运行！"
-    exit 1
+# 1. 检查 root 权限
+if [ "$EUID" -ne 0 ]; then
+  echo "请使用 root 权限运行此脚本"
+  exit 1
 fi
 
-# 安装必要工具：wget, curl, unzip
-function install_dependencies() {
-    echo "[初始化] 正在安装必要依赖（wget, curl, unzip）..."
-    apt update -y >/dev/null 2>&1
+echo "开始安装 AnyTLS..."
 
-    for dep in wget curl unzip; do
-        if ! command -v $dep &>/dev/null; then
-            echo "正在安装 $dep..."
-            apt install -y $dep || {
-                echo "无法安装依赖: $dep，请手动运行 'sudo apt install $dep' 后再继续。"
-                exit 1
-            }
-        fi
-    done
+# 验证端口是否合法函数
+is_valid_port() {
+  local port=$1
+  if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+    return 0
+  else
+    return 1
+  fi
 }
 
-# 调用依赖安装函数
-install_dependencies
+# 检查端口是否被占用函数
+is_port_in_use() {
+  local port=$1
+  if ss -tuln | grep -q ":$port\b"; then
+    return 0
+  else
+    return 1
+  fi
+}
 
-# 自动检测系统架构
-ARCH=$(uname -m)
-case $ARCH in
-    x86_64)  BINARY_ARCH="amd64" ;;
-    aarch64) BINARY_ARCH="arm64" ;;
-    armv7l)  BINARY_ARCH="armv7" ;;
-    *)       echo "不支持的架构: $ARCH"; exit 1 ;;
-esac
-
-# 配置参数
-DOWNLOAD_URL="https://github.com/anytls/anytls-go/releases/download/v0.0.8/anytls_0.0.8_linux_${BINARY_ARCH}.zip"
-ZIP_FILE="/tmp/anytls_0.0.8_linux_${BINARY_ARCH}.zip"
-BINARY_DIR="/usr/local/bin"
-BINARY_NAME="anytls-server"
-SERVICE_NAME="anytls"
-
-# 改进的IP获取函数
+# 获取公网 IP 函数
 get_ip() {
     local ip=""
     ip=$(ip -o -4 addr show scope global | awk '{print $4}' | cut -d'/' -f1 | head -n1)
-    [ -z "$ip" ] && ip=$(ifconfig 2>/dev/null | grep -oP 'inet \K[\d.]+' | grep -v '127.0.0.1' | head -n1)
     [ -z "$ip" ] && ip=$(curl -4 -s --connect-timeout 3 ifconfig.me 2>/dev/null || curl -4 -s --connect-timeout 3 icanhazip.com 2>/dev/null)
-    
     if [ -z "$ip" ]; then
-        echo "未能自动获取IP，请手动输入服务器IP地址"
-        read -p "请输入服务器IP地址: " ip
+        read -p "未能获取公网 IP，请手动输入: " ip
     fi
-    
     echo "$ip"
 }
 
-# 验证端口是否合法
-function validate_port() {
-    local port=$1
-    if [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        echo "错误：端口号无效！端口号应在 1 到 65535 之间。"
-        return 1
-    fi
+# 2. 默认参数
+DEFAULT_PORT=1443
+DEFAULT_USER_CREDENTIAL="xR3fd10H:6cdiG9f1b6jo"
+DEFAULT_CERT_CN="genshin.hoyoverse.com"
 
-    # 检查端口是否被占用
-    if ss -tuln | grep ":$port " > /dev/null; then
-        echo "错误：端口 $port 已被占用，请选择另一个端口。"
-        return 1
-    fi
+while true; do
+  read -p "请输入端口（默认: $DEFAULT_PORT）: " ANYTLS_PORT
+  ANYTLS_PORT=${ANYTLS_PORT:-$DEFAULT_PORT}
+  if ! is_valid_port "$ANYTLS_PORT"; then
+    echo "端口号不合法，请输入1-65535之间的数字"
+    continue
+  fi
+  if is_port_in_use "$ANYTLS_PORT"; then
+    echo "端口 $ANYTLS_PORT 已被占用，请换一个端口"
+    continue
+  fi
+  break
+done
 
-    return 0
-}
+read -p "请输入用户/密码（默认: $DEFAULT_USER_CREDENTIAL）: " USER_CREDENTIAL
+USER_CREDENTIAL=${USER_CREDENTIAL:-$DEFAULT_USER_CREDENTIAL}
 
-# 显示菜单
-function show_menu() {
-    clear
-    echo "-------------------------------------"
-    echo " anytls 服务管理脚本 (${BINARY_ARCH}架构) "
-    echo "-------------------------------------"
-    echo "1. 安装 anytls"
-    echo "2. 卸载 anytls"
-    echo "0. 退出"
-    echo "-------------------------------------"
-    read -p "请输入选项 [0-2]: " choice
-    case $choice in
-        1) install_anytls ;;
-        2) uninstall_anytls ;;
-        0) exit 0 ;;
-        *) echo "无效选项！" && sleep 1 && show_menu ;;
-    esac
-}
+read -p "请输入证书域名（默认: $DEFAULT_CERT_CN）: " CERT_CN
+CERT_CN=${CERT_CN:-$DEFAULT_CERT_CN}
 
-# 安装功能
-function install_anytls() {
-    # 下载
-    echo "[1/5] 下载 anytls (${BINARY_ARCH}架构)..."
-    wget "$DOWNLOAD_URL" -O "$ZIP_FILE" || {
-        echo "下载失败！可能原因："
-        echo "1. 网络连接问题"
-        echo "2. 该架构的二进制文件不存在"
-        exit 1
-    }
+# 3. 安装必要工具
+apt update && apt install -y wget curl unzip openssl
 
-    # 解压
-    echo "[2/5] 解压文件..."
-    unzip -o "$ZIP_FILE" -d "$BINARY_DIR" || {
-        echo "解压失败！文件可能损坏"
-        exit 1
-    }
-    chmod +x "$BINARY_DIR/$BINARY_NAME"
+# 4. 下载 mihomo 并解压
+DOWNLOAD_URL="https://raw.githubusercontent.com/meng-jin/AnyTLS/main/mihomo.zip"
+DEST_DIR="/usr/local/bin"
+TEMP_ZIP="/tmp/mihomo.zip"
 
-    # 输入密码
-    read -p "设置 anytls 的密码: " PASSWORD
-    [ -z "$PASSWORD" ] && {
-        echo "错误：密码不能为空！"
-        exit 1
-    }
+wget -O "$TEMP_ZIP" "$DOWNLOAD_URL"
+unzip -o "$TEMP_ZIP" -d "$DEST_DIR"
+chmod +x "$DEST_DIR"/*
+rm -f "$TEMP_ZIP"
 
-    # 输入端口
-    while true; do
-        read -p "请输入服务监听的端口（默认端口：8443）: " PORT
-        PORT=${PORT:-8443}  # 默认端口8443
-        validate_port "$PORT" && break
-    done
+# 5. 创建配置目录
+CONFIG_DIR="/etc/mihomo"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
+mkdir -p "$CONFIG_DIR"
 
-    # 配置服务
-    echo "[3/5] 配置 systemd 服务..."
-    cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+# 6. 生成自签证书
+echo "正在生成自签证书..."
+openssl ecparam -name prime256v1 -genkey -noout -out "$CONFIG_DIR/server.key"
+openssl req -new -x509 -key "$CONFIG_DIR/server.key" -out "$CONFIG_DIR/server.crt" -days 36500 -subj "/CN=${CERT_CN}"
+
+# 7. 写入 config.yaml
+cat <<EOF > "$CONFIG_FILE"
+mixed-port: 65222
+tcp-concurrent: true
+allow-lan: false
+ipv6: true
+log-level: info
+rules:
+  - MATCH,DIRECT
+listeners:
+  - name: anytls-in
+    type: anytls
+    port: ${ANYTLS_PORT}
+    listen: "::"
+    users:
+      - "${USER_CREDENTIAL}"
+    certificate: ${CONFIG_DIR}/server.crt
+    private-key: ${CONFIG_DIR}/server.key
+EOF
+
+chmod 644 "$CONFIG_FILE"
+chown root:root "$CONFIG_FILE"
+
+# 8. 创建 systemd 服务
+SERVICE_FILE="/etc/systemd/system/mihomo.service"
+cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=anytls Service
-After=network.target
+Description=mihomo Daemon, Another Clash Kernel.
+After=network.target NetworkManager.service systemd-networkd.service iwd.service
 
 [Service]
-ExecStart=$BINARY_DIR/$BINARY_NAME -l 0.0.0.0:$PORT -p $PASSWORD
+Type=simple
+LimitNPROC=500
+LimitNOFILE=1000000
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_TIME CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_TIME CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
 Restart=always
-User=root
-Group=root
+ExecStartPre=/usr/bin/sleep 1s
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo
+ExecReload=/bin/kill -HUP \$MAINPID
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # 启动服务
-    echo "[4/5] 启动服务..."
-    systemctl daemon-reload
-    systemctl enable $SERVICE_NAME
-    systemctl start $SERVICE_NAME
+chmod 644 "$SERVICE_FILE"
+chown root:root "$SERVICE_FILE"
 
-    # 清理
-    rm -f "$ZIP_FILE"
+# 9. 启动并启用服务
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable mihomo.service
+systemctl start mihomo.service
 
-    # 获取服务器IP
-    SERVER_IP=$(get_ip)
+echo "AnyTLS 安装完成！
+- AnyTLS 端口: $ANYTLS_PORT
+- 用户凭据: $USER_CREDENTIAL
+- 证书域名: $CERT_CN"
 
-    # 验证
-    echo -e "\n\033[32m√ 安装完成！\033[0m"
-    echo -e "\033[32m√ 架构类型: ${BINARY_ARCH}\033[0m"
-    echo -e "\033[32m√ 服务名称: $SERVICE_NAME\033[0m"
-    echo -e "\033[32m√ 监听端口: 0.0.0.0:$PORT\033[0m"
-    echo -e "\033[32m√ 密码已设置为: $PASSWORD\033[0m"
-    echo -e "\n\033[33m管理命令:\033[0m"
-    echo -e "  启动: systemctl start $SERVICE_NAME"
-    echo -e "  停止: systemctl stop $SERVICE_NAME"
-    echo -e "  重启: systemctl restart $SERVICE_NAME"
-    echo -e "  状态: systemctl status $SERVICE_NAME"
-    
-    # 高亮显示连接信息
-    echo -e "\n\033[36m\033[1m〓 NekoBox连接信息 〓\033[0m"
-    echo -e "\033[30;43m\033[1m anytls://$PASSWORD@$SERVER_IP:$PORT/?insecure=1 \033[0m"
-    echo -e "\033[33m\033[1m请妥善保管此连接信息！\033[0m"
-}
+# 获取 IP 并输出链接信息
+IP_ADDR=$(get_ip)
+PASS=$(echo "$USER_CREDENTIAL" | cut -d: -f2)
 
-# 卸载功能
-function uninstall_anytls() {
-    echo "正在卸载 anytls..."
-    
-    # 停止服务
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        systemctl stop $SERVICE_NAME
-        echo "[1/4] 已停止服务"
-    fi
+echo -e "\n\033[36m\033[1m〓 NekoBox连接信息 〓\033[0m"
+echo -e "\033[33m\033[1m请妥善保管此连接信息！\033[0m"
+echo -e "\033[32m\033[1manytls://${PASS}@${IP_ADDR}:${ANYTLS_PORT}/?insecure=1&sni=${CERT_CN}\033[0m"
 
-    # 禁用服务
-    if systemctl is-enabled --quiet $SERVICE_NAME; then
-        systemctl disable $SERVICE_NAME
-        echo "[2/4] 已禁用开机启动"
-    fi
-
-    # 删除文件
-    if [ -f "$BINARY_DIR/$BINARY_NAME" ]; then
-        rm -f "$BINARY_DIR/$BINARY_NAME"
-        echo "[3/4] 已删除二进制文件"
-    fi
-
-    # 清理配置
-    if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; then
-        rm -f "/etc/systemd/system/$SERVICE_NAME.service"
-        echo "[4/4] 已删除 systemd 服务配置"
-    fi
-
-    # 重载 systemd
-    systemctl daemon-reload
-    echo "[5/5] 卸载完成"
-}
-
-# 执行菜单
-show_menu
+systemctl status mihomo.service --no-pager
