@@ -30,7 +30,7 @@ is_port_in_use() {
   fi
 }
 
-# 获取公网 IP 函数
+# 获取 IP 函数
 get_ip() {
     local ip=""
     ip=$(ip -o -4 addr show scope global | awk '{print $4}' | cut -d'/' -f1 | head -n1)
@@ -41,7 +41,7 @@ get_ip() {
     echo "$ip"
 }
 
-# 2. 默认参数
+# 2. 交互获取参数（带默认值，验证端口）
 DEFAULT_PORT=1443
 DEFAULT_USER_CREDENTIAL="xR3fd10H:6cdiG9f1b6jo"
 DEFAULT_CERT_CN="genshin.hoyoverse.com"
@@ -60,11 +60,15 @@ while true; do
   break
 done
 
-read -p "请输入用户/密码（默认: $DEFAULT_USER_CREDENTIAL）: " USER_CREDENTIAL
+read -p "请输入用户凭据（格式 username:password，默认: $DEFAULT_USER_CREDENTIAL）: " USER_CREDENTIAL
 USER_CREDENTIAL=${USER_CREDENTIAL:-$DEFAULT_USER_CREDENTIAL}
 
 read -p "请输入证书域名（默认: $DEFAULT_CERT_CN）: " CERT_CN
 CERT_CN=${CERT_CN:-$DEFAULT_CERT_CN}
+
+# 拆分用户名和密码
+USER=$(echo "$USER_CREDENTIAL" | cut -d':' -f1)
+PASSWORD=$(echo "$USER_CREDENTIAL" | cut -d':' -f2)
 
 # 3. 安装必要工具
 apt update && apt install -y wget curl unzip openssl
@@ -104,9 +108,9 @@ listeners:
     port: ${ANYTLS_PORT}
     listen: "::"
     users:
-      - "${USER_CREDENTIAL}"
-    certificate: ${CONFIG_DIR}/server.crt
-    private-key: ${CONFIG_DIR}/server.key
+      ${USER}: ${PASSWORD}
+    certificate: ./server.crt
+    private-key: ./server.key
 EOF
 
 chmod 644 "$CONFIG_FILE"
@@ -143,17 +147,17 @@ systemctl daemon-reload
 systemctl enable mihomo.service
 systemctl start mihomo.service
 
-echo "AnyTLS 安装完成！
-- AnyTLS 端口: $ANYTLS_PORT
-- 用户凭据: $USER_CREDENTIAL
-- 证书域名: $CERT_CN"
+# 获取 IP
+IP=$(get_ip)
 
-# 获取 IP 并输出链接信息
-IP_ADDR=$(get_ip)
-PASS=$(echo "$USER_CREDENTIAL" | cut -d: -f2)
-
+# 输出连接信息，高亮显示
 echo -e "\n\033[36m\033[1m〓 NekoBox连接信息 〓\033[0m"
 echo -e "\033[33m\033[1m请妥善保管此连接信息！\033[0m"
-echo -e "\033[32m\033[1manytls://${PASS}@${IP_ADDR}:${ANYTLS_PORT}/?insecure=1&sni=${CERT_CN}\033[0m"
+echo -e "\033[36manytls://${PASSWORD}@${IP}:${ANYTLS_PORT}/?insecure=1&sni=${CERT_CN}\033[0m"
+
+echo -e "\nAnyTLS 安装完成！"
+echo "- AnyTLS 端口: $ANYTLS_PORT"
+echo "- 用户凭据: $USER_CREDENTIAL"
+echo "- 证书域名: $CERT_CN"
 
 systemctl status mihomo.service --no-pager
