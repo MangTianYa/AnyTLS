@@ -159,5 +159,3 @@ echo -e "\nAnyTLS 安装完成！"
 echo "- AnyTLS 端口: $ANYTLS_PORT"
 echo "- 用户凭据: $USER_CREDENTIAL"
 echo "- 证书域名: $CERT_CN"
-
-systemctl status mihomo.service --no-pager
