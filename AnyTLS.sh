@@ -74,7 +74,7 @@ PASSWORD=$(echo "$USER_CREDENTIAL" | cut -d':' -f2)
 apt update && apt install -y wget curl unzip openssl
 
 # 4. 下载 mihomo 并解压
-DOWNLOAD_URL="https://raw.githubusercontent.com/meng-jin/AnyTLS/main/mihomo.zip"
+DOWNLOAD_URL="https://ghfast.top/?q=raw.githubusercontent.com%2Fmeng-jin%2FAnyTLS%2Fmain%2Fmihomo.zip"
 DEST_DIR="/usr/local/bin"
 TEMP_ZIP="/tmp/mihomo.zip"
 
